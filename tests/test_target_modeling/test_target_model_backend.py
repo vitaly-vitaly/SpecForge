@@ -76,8 +76,8 @@ def test_target_model_backend(rank, world_size, port, tp_size):
     )
     del sgl_target_model
 
-    assert torch.equal(hf_out.loss_mask, sgl_out.loss_mask)
-    assert torch.equal(hf_out.input_ids, sgl_out.input_ids)
+    assert torch.equal(hf_out.loss_mask, sgl_out.loss_mask), f"Loss mask are not equal: \ndiff: \n{hf_out.loss_mask}, \n{sgl_out.loss_mask}"
+    assert torch.equal(hf_out.input_ids, sgl_out.input_ids), f"Input ids are not equal: \ndiff: {hf_out.input_ids - sgl_out.input_ids}"
     assert torch.allclose(
         hf_out.hidden_states, sgl_out.hidden_states, atol=1e-1, rtol=1e-2
     ), f"Hidden states are not close, diff: \n{(hf_out.hidden_states - sgl_out.hidden_states).abs().max()}"
