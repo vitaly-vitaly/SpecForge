@@ -23,6 +23,7 @@ from specforge import (
     AutoEagle3DraftModel,
     OnlineEagle3Model,
     QwenVLOnlineEagle3Model,
+    load_qwen2_5_vl_target_model,
 )
 from specforge.data import (
     build_eagle3_dataset,
@@ -228,7 +229,7 @@ def build_tracker(args: Namespace, parser: ArgumentParser) -> Tracker:
 
 def build_target_model(
     args: Namespace, draft_model_config: AutoDraftModelConfig
-) -> Eagle3TargetModel:
+) -> Tuple[nn.Module, Optional[AutoProcessor]]:
     """
     Build the target model according to the arguments.
 
@@ -237,22 +238,13 @@ def build_target_model(
         draft_model_config: The draft model config.
 
     Returns:
-        The target model.
+        The target model and optional processor for VLM targets.
     """
-    if (
-        args.is_vlm
-        and draft_model_config.target_model_type == "qwen2_5_vl"
-        and args.tp_size == 1
-    ):
-        from transformers import Qwen2_5_VLForConditionalGeneration
-
-        target_model = (
-            Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                pretrained_model_name_or_path=args.target_model_path,
-                torch_dtype=torch.bfloat16,
-            )
-            .eval()
-            .cuda()
+    if args.is_vlm and draft_model_config.target_model_type == "qwen2_5_vl":
+        target_model = load_qwen2_5_vl_target_model(
+            pretrained_model_name_or_path=args.target_model_path,
+            torch_dtype=torch.bfloat16,
+            cache_dir=args.cache_dir,
         )
     else:
         target_model = get_eagle3_target_model(
@@ -605,6 +597,7 @@ def main():
             target_model=target_model,
             draft_model=draft_model,
             processor=processor,
+            target_model_path=args.target_model_path,
             length=args.ttt_length,
             attention_backend=args.attention_backend,
         )
@@ -615,6 +608,10 @@ def main():
             attention_backend=args.attention_backend,
         )
 
+    ignored_modules = None
+    if args.is_vlm:
+        ignored_modules = [eagle3_model.target_model]
+
     eagle3_model = FSDP(
         eagle3_model,
         use_orig_params=True,
@@ -624,6 +621,7 @@ def main():
         ),
         sharding_strategy=ShardingStrategy.SHARD_GRAD_OP,
         process_group=dist.group.WORLD,  # the draft model should run dp for all processes
+        ignored_modules=ignored_modules,
     )
     print_with_rank("Initialized Eagle3 FSDP model")
 

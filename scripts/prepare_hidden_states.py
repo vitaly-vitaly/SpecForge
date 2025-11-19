@@ -31,10 +31,12 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 
+from specforge import load_qwen2_5_vl_target_model
 from specforge.data import build_eagle3_dataset, prepare_dp_dataloaders
 from specforge.distributed import (
     destroy_distributed,
@@ -104,24 +106,18 @@ def parse_args():
 
 def build_target_model(
     args: argparse.Namespace, model_config: AutoConfig
-) -> Tuple[Eagle3TargetModel, Optional[AutoProcessor]]:
+) -> Tuple[nn.Module, Optional[AutoProcessor]]:
     """
     Build the target model according to the arguments.
 
     For VLM models (Qwen2.5-VL) without TP, load directly from transformers.
     Otherwise, use the Eagle3 target model wrapper.
     """
-    if args.is_vlm and model_config.model_type == "qwen2_5_vl" and args.tp_size == 1:
-        # TODO: replace with sglang
-        from transformers import Qwen2_5_VLForConditionalGeneration
-
-        target_model = (
-            Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                pretrained_model_name_or_path=args.target_model_path,
-                torch_dtype=torch.bfloat16,
-            )
-            .eval()
-            .cuda()
+    if args.is_vlm and model_config.model_type == "qwen2_5_vl":
+        target_model = load_qwen2_5_vl_target_model(
+            pretrained_model_name_or_path=args.target_model_path,
+            torch_dtype=torch.bfloat16,
+            cache_dir=args.cache_dir,
         )
     else:
         target_model = get_eagle3_target_model(
@@ -132,8 +128,9 @@ def build_target_model(
             cache_dir=args.cache_dir,
         )
 
-    # Set auxiliary hidden states layers if specified
-    target_model.set_aux_hidden_states_layers(args.aux_hidden_states_layers)
+    # Set auxiliary hidden states layers if supported by the target wrapper
+    if hasattr(target_model, "set_aux_hidden_states_layers"):
+        target_model.set_aux_hidden_states_layers(args.aux_hidden_states_layers)
 
     if args.is_vlm:
         processor = AutoProcessor.from_pretrained(args.target_model_path)

@@ -23,14 +23,58 @@
 from typing import List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers.cache_utils import DynamicCache
 
+from specforge.distributed import get_tp_device_mesh, get_tp_group
 from specforge.core.loss import LogSoftmaxLoss
 from specforge.modeling.draft import Eagle3DraftModel
 from specforge.utils import padding
+
+
+def load_qwen2_5_vl_target_model(
+    pretrained_model_name_or_path: str,
+    torch_dtype: torch.dtype = torch.bfloat16,
+    cache_dir: Optional[str] = None,
+    device: Optional[str] = None,
+):
+    """
+    Load Qwen2.5-VL target model with optional tensor parallelism support.
+    """
+    from transformers import Qwen2_5_VLForConditionalGeneration
+
+    tp_group = get_tp_group()
+    tp_size = dist.get_world_size(tp_group) if tp_group is not None else 1
+
+    load_kwargs = {
+        "pretrained_model_name_or_path": pretrained_model_name_or_path,
+        "torch_dtype": torch_dtype,
+        "cache_dir": cache_dir,
+    }
+
+    if tp_size > 1:
+        load_kwargs.update(
+            {
+                "tp_plan": "auto",
+                "tp_size": tp_size,
+                "device_mesh": get_tp_device_mesh(),
+            }
+        )
+    else:
+        target_device = device or f"cuda:{torch.cuda.current_device()}"
+        load_kwargs.update({"device_map": {"": target_device}})
+
+    target_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(**load_kwargs)
+    if tp_size == 1 and device is not None:
+        target_model = target_model.to(device)
+
+    target_model.eval()
+    for param in target_model.parameters():
+        param.requires_grad = False
+    return target_model
 
 
 class Eagle3Model(nn.Module):
@@ -298,6 +342,7 @@ class QwenVLOnlineEagle3Model(Eagle3Model):
         processor,
         length: int = 7,
         attention_backend: str = "sdpa",
+        target_model_path: Optional[str] = None,
     ):
         """
         Args:
@@ -306,7 +351,22 @@ class QwenVLOnlineEagle3Model(Eagle3Model):
             length: TTT length, it means how many turns to unroll during TTT.
         """
         super().__init__()
+        if target_model is None:
+            if target_model_path is None:
+                raise ValueError(
+                    "target_model_path is required when target_model is not provided."
+                )
+            target_model = load_qwen2_5_vl_target_model(
+                pretrained_model_name_or_path=target_model_path
+            )
+
+        self.target_model_path = target_model_path or getattr(
+            target_model, "name_or_path", None
+        )
         self.target_model = target_model
+        self.target_model.eval()
+        for param in self.target_model.parameters():
+            param.requires_grad_(False)
         self.draft_model = draft_model
         self.processor = processor
         self.length = length
@@ -525,8 +585,12 @@ class QwenVLOnlineEagle3Model(Eagle3Model):
             is_last = idx == self.length - 1
 
             # Step 5.1: embed the input ids
-            # inputs_embeds = self._get_input_embeds(input_ids, pixel_values, image_grid_thw)
-            inputs_embeds = self.draft_model.embed_input_ids(input_ids)
+            if pixel_values is not None and image_grid_thw is not None:
+                inputs_embeds = self._get_input_embeds(
+                    input_ids, pixel_values, image_grid_thw
+                )
+            else:
+                inputs_embeds = self.draft_model.embed_input_ids(input_ids)
             inputs_embeds = inputs_embeds.to(hidden_states.dtype)
 
             # Step 5.2: run the draft model backbone
