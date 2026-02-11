@@ -63,6 +63,12 @@ def parse_args() -> Tuple[ArgumentParser, Namespace]:
         help="Draft model config path. If not provided, will auto-generate from target model.",
     )
     parser.add_argument(
+        "--draft-init-path",
+        type=str,
+        default=None,
+        help="Optional path to initialize the draft model weights (e.g., a previous checkpoint). Overrides random init when --resume is not used.",
+    )
+    parser.add_argument(
         "--embedding-key",
         type=str,
         default="model.embed_tokens.weight",
@@ -296,15 +302,7 @@ def sanity_check(args: Namespace) -> None:
 
 def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]:
     # Handle draft model config
-    if args.draft_model_config is None:
-        # Auto-generate and save config file
-        auto_config_path = create_draft_config_from_target(
-            target_model_path=args.target_model_path, cache_dir=args.cache_dir
-        )
-        draft_model_config = AutoDraftModelConfig.from_file(auto_config_path)
-    else:
-        # Use provided config file
-        draft_model_config = AutoDraftModelConfig.from_file(args.draft_model_config)
+    draft_model_config = None
 
     # detecting last ckpt for draft model
     draft_model_last_checkpoint = None
@@ -319,7 +317,30 @@ def build_draft_model(args: Namespace) -> Tuple[AutoDraftModelConfig, nn.Module]
             attention_backend=args.attention_backend,
             torch_dtype=torch.bfloat16,
         ).cuda()
+        draft_model_config = draft_model.config
+        print_on_rank0(
+            f"Initialized draft model from checkpoint: {draft_model_last_checkpoint}"
+        )
+    elif args.draft_init_path is not None:
+        draft_model = AutoEagle3DraftModel.from_pretrained(
+            args.draft_init_path,
+            attention_backend=args.attention_backend,
+            torch_dtype=torch.bfloat16,
+        ).cuda()
+        draft_model_config = draft_model.config
+        print_on_rank0(f"Initialized draft model from init path: {args.draft_init_path}")
     else:
+        if args.draft_model_config is None:
+            # Auto-generate and save config file
+            auto_config_path = create_draft_config_from_target(
+                target_model_path=args.target_model_path, cache_dir=args.cache_dir
+            )
+            draft_model_config = AutoDraftModelConfig.from_file(auto_config_path)
+        else:
+            # Use provided config file
+            draft_model_config = AutoDraftModelConfig.from_file(
+                args.draft_model_config
+            )
         draft_model = AutoEagle3DraftModel.from_config(
             draft_model_config,
             attention_backend=args.attention_backend,
